@@ -3,8 +3,8 @@ pragma solidity ^0.8.20;
 
 import "./interfaces/IERC20.sol";
 
-/// @title ProtectedPoolReceiver v1.1.0 - Hardened Liquidity Vault & Pool Wrapper
-/// @notice Implements atomic circuit breaker pause, anti-Sybil LP freeze, and non-custodial emergency asset withdrawal
+/// @title ProtectedPoolReceiver - Vault & Managed Liquidity Position Wrapper
+/// @notice Implements atomic circuit breaker pause, anti-Sybil LP freeze, and non-custodial emergency withdrawals
 contract ProtectedPoolReceiver {
     address public circuitBreaker;
     address public immutable token0;
@@ -82,7 +82,7 @@ contract ProtectedPoolReceiver {
         emit EmergencyWindDownActive();
     }
 
-    /// @notice Full non-reentrant emergency exit: users burn LP shares and receive proportional underlying ERC20 tokens
+    /// @notice Complete non-reentrant emergency exit: users burn LP shares and receive proportional underlying ERC20 tokens
     function orderlyWithdraw(uint256 lpAmount) external nonReentrant returns (uint256 amount0, uint256 amount1) {
         require(emergencyWindDownActive, "WIND_DOWN_NOT_ACTIVE");
         require(lpBalances[msg.sender] >= lpAmount, "INSUFFICIENT_LP");
