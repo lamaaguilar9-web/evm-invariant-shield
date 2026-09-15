@@ -2,61 +2,59 @@
 pragma solidity ^0.8.20;
 
 import "./libraries/FullMath.sol";
-import "./libraries/InvariantChecker.sol";
+import "./libraries/UniswapV3InvariantChecker.sol";
+import "./interfaces/IERC20.sol";
+import "./interfaces/IUniswapV3Pool.sol";
 
-/// @title EVM Invariant Shield - Autonomous Non-Custodial Circuit Breaker
-/// @notice Protects Ethereum L1 DeFi pools (Uniswap v3, Aave v3) against atomic flash-loans and pool drain attacks
-/// @dev Implements asymmetric governance: Bot has PAUSER_ROLE; Gnosis Safe multisig (3/5) has UNPAUSER_ROLE
+/// @title EVM Invariant Shield v1.1.0 - Production Hardened Circuit Breaker
+/// @notice Autonomous non-custodial protection for Uniswap v3 & Aave v3 wrappers and vaults
+/// @dev Direct on-chain slot0 and balanceOf reads eliminate parameter injection DoS risks entirely
 contract EVMInvariantShield {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant UNPAUSER_ROLE = keccak256("UNPAUSER_ROLE");
     bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
 
-    // Roles mapping
     mapping(bytes32 => mapping(address => bool)) private _roles;
 
-    // Configuration constants
     uint256 public constant MAX_CONSECUTIVE_PAUSES = 2;
     uint256 public constant EMERGENCY_TIMEOUT = 24 hours;
-    uint256 public constant DEFAULT_MAX_DROP_BPS = 1500; // 15% drop
+    uint256 public constant DEFAULT_MAX_DEVIATION_BPS = 1500; // 15% price or reserve anomaly
 
     enum PoolState { NORMAL, PAUSED, EMERGENCY_WIND_DOWN }
 
-    struct PoolConfig {
+    struct TargetConfig {
         bool isRegistered;
         PoolState state;
-        uint256 initialK;
+        address poolReceiver; // Vault or Position Manager hook
+        address token0;
+        address token1;
+        uint160 initialSqrtPriceX96;
+        uint256 initialReserve0;
+        uint256 initialReserve1;
         uint256 lastPauseTimestamp;
         uint256 consecutivePauses;
-        address poolReceiver;
     }
 
-    mapping(address => PoolConfig) public pools;
+    mapping(address => TargetConfig) public targets;
 
-    // Events
-    event PoolRegistered(address indexed poolAddress, address indexed poolReceiver, uint256 initialK);
-    event EmergencyPauseTriggered(address indexed poolAddress, uint256 currentK, uint256 dropBps, address indexed triggeredBy);
-    event PoolUnpausedByMultisig(address indexed poolAddress, address indexed unpausedBy);
-    event EmergencyWindDownActivated(address indexed poolAddress, uint256 timestamp);
+    event TargetRegistered(address indexed targetPool, address indexed poolReceiver, uint160 initialSqrtPriceX96);
+    event EmergencyPauseTriggered(address indexed targetPool, uint160 currentSqrtPriceX96, uint256 deviationBps, address indexed triggeredBy);
+    event TargetUnpausedByMultisig(address indexed targetPool, address indexed unpausedBy);
+    event EmergencyWindDownActivated(address indexed targetPool, uint256 timestamp);
     event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
     event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
 
     modifier onlyRole(bytes32 role) {
-        require(hasRole(role, msg.sender), "ACCESS_CONTROL: SENDER_LACKS_ROLE");
+        require(_roles[role][msg.sender], "ACCESS_CONTROL: SENDER_LACKS_ROLE");
         _;
     }
 
     constructor(address sentinelBot, address gnosisSafeMultisig) {
-        require(sentinelBot != address(0), "INVALID_SENTINEL_BOT");
-        require(gnosisSafeMultisig != address(0), "INVALID_MULTISIG");
-
-        // Sentinel Bot has exclusively PAUSER_ROLE
+        require(sentinelBot != address(0) && gnosisSafeMultisig != address(0), "INVALID_ADDRESS");
         _roles[PAUSER_ROLE][sentinelBot] = true;
-        emit RoleGranted(PAUSER_ROLE, sentinelBot, msg.sender);
-
-        // Gnosis Safe multisig has UNPAUSER_ROLE and DEFAULT_ADMIN_ROLE
         _roles[UNPAUSER_ROLE][gnosisSafeMultisig] = true;
         _roles[DEFAULT_ADMIN_ROLE][gnosisSafeMultisig] = true;
+        emit RoleGranted(PAUSER_ROLE, sentinelBot, msg.sender);
         emit RoleGranted(UNPAUSER_ROLE, gnosisSafeMultisig, msg.sender);
         emit RoleGranted(DEFAULT_ADMIN_ROLE, gnosisSafeMultisig, msg.sender);
     }
@@ -75,105 +73,143 @@ contract EVMInvariantShield {
         emit RoleRevoked(role, account, msg.sender);
     }
 
-    /// @notice Registers a target pool (Uniswap v3 / Aave v3 wrapper) for circuit breaker monitoring
-    function registerPool(
-        address poolAddress,
+    /// @notice Registers target pool and its defensive wrapper with baseline on-chain state
+    function registerTarget(
+        address targetPool,
         address poolReceiver,
-        uint256 initialReserve0,
-        uint256 initialReserve1
+        address token0,
+        address token1
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(poolAddress != address(0) && poolReceiver != address(0), "INVALID_ADDRESS");
-        require(!pools[poolAddress].isRegistered, "ALREADY_REGISTERED");
+        require(targetPool != address(0) && poolReceiver != address(0), "INVALID_ADDRESS");
+        require(!targets[targetPool].isRegistered, "ALREADY_REGISTERED");
 
-        uint256 initialK = InvariantChecker.computeK(initialReserve0, initialReserve1);
-        require(initialK > 0, "INVALID_INITIAL_K");
+        // Read baseline sqrtPriceX96 directly on-chain from slot0 if supported
+        uint160 sqrtPriceX96 = 0;
+        try IUniswapV3Pool(targetPool).slot0() returns (uint160 _sqrtPriceX96, int24, uint16, uint16, uint16, uint8, bool) {
+            sqrtPriceX96 = _sqrtPriceX96;
+        } catch {
+            // Fallback for non-v3 direct pool
+            sqrtPriceX96 = 0;
+        }
 
-        pools[poolAddress] = PoolConfig({
+        uint256 res0 = IERC20(token0).balanceOf(targetPool);
+        uint256 res1 = IERC20(token1).balanceOf(targetPool);
+
+        targets[targetPool] = TargetConfig({
             isRegistered: true,
             state: PoolState.NORMAL,
-            initialK: initialK,
+            poolReceiver: poolReceiver,
+            token0: token0,
+            token1: token1,
+            initialSqrtPriceX96: sqrtPriceX96,
+            initialReserve0: res0,
+            initialReserve1: res1,
             lastPauseTimestamp: 0,
-            consecutivePauses: 0,
-            poolReceiver: poolReceiver
+            consecutivePauses: 0
         });
 
-        emit PoolRegistered(poolAddress, poolReceiver, initialK);
+        emit TargetRegistered(targetPool, poolReceiver, sqrtPriceX96);
     }
 
-    /// @notice Autonomous trigger executed by Sentinel Bot (<45ms) upon cryptographic invariant drop > 15%
-    function triggerEmergencyPause(
-        address poolAddress,
-        uint256 currentReserve0,
-        uint256 currentReserve1
-    ) external onlyRole(PAUSER_ROLE) {
-        PoolConfig storage config = pools[poolAddress];
-        require(config.isRegistered, "POOL_NOT_REGISTERED");
-        require(config.state == PoolState.NORMAL, "POOL_NOT_IN_NORMAL_STATE");
-        require(config.consecutivePauses < MAX_CONSECUTIVE_PAUSES, "MAX_CONSECUTIVE_PAUSES_REACHED");
+    /// @notice HARDENED TRIGGER: Zero external parameters. State is queried 100% on-chain.
+    /// @dev Eliminates parameter injection DoS attacks. Reverts if on-chain state has not suffered >15% drop.
+    function triggerEmergencyPause(address targetPool) external onlyRole(PAUSER_ROLE) {
+        TargetConfig storage config = targets[targetPool];
+        require(config.isRegistered, "NOT_REGISTERED");
+        require(config.state == PoolState.NORMAL, "NOT_NORMAL");
+        require(config.consecutivePauses < MAX_CONSECUTIVE_PAUSES, "MAX_PAUSES_REACHED");
 
-        uint256 currentK = InvariantChecker.computeK(currentReserve0, currentReserve1);
-        (bool dropExceeded, uint256 dropBps) = InvariantChecker.checkInvariantDrop(
-            config.initialK,
-            currentK,
-            DEFAULT_MAX_DROP_BPS
-        );
+        bool anomalyDetected = false;
+        uint256 recordedDeviationBps = 0;
+        uint160 currentSqrtPriceX96 = 0;
 
-        require(dropExceeded, "INVARIANT_DROP_NOT_EXCEEDED");
+        // 1. Direct on-chain Uniswap v3 slot0 price check
+        if (config.initialSqrtPriceX96 > 0) {
+            (uint160 _currSqrtPriceX96,,,,,,) = IUniswapV3Pool(targetPool).slot0();
+            currentSqrtPriceX96 = _currSqrtPriceX96;
+            (bool priceExceeded, uint256 priceBps) = UniswapV3InvariantChecker.checkPriceDeviation(
+                config.initialSqrtPriceX96,
+                _currSqrtPriceX96,
+                DEFAULT_MAX_DEVIATION_BPS
+            );
+            if (priceExceeded) {
+                anomalyDetected = true;
+                recordedDeviationBps = priceBps;
+            }
+        }
+
+        // 2. Direct on-chain ERC20 reserve balance check
+        if (!anomalyDetected && config.initialReserve0 > 0 && config.initialReserve1 > 0) {
+            uint256 currRes0 = IERC20(config.token0).balanceOf(targetPool);
+            uint256 currRes1 = IERC20(config.token1).balanceOf(targetPool);
+            (bool resExceeded, uint256 resBps) = UniswapV3InvariantChecker.checkReserveDrop(
+                config.initialReserve0,
+                config.initialReserve1,
+                currRes0,
+                currRes1,
+                DEFAULT_MAX_DEVIATION_BPS
+            );
+            if (resExceeded) {
+                anomalyDetected = true;
+                recordedDeviationBps = resBps;
+            }
+        }
+
+        // Must strictly prove on-chain that invariant drop occurred
+        require(anomalyDetected, "INVARIANT_DROP_NOT_EXCEEDED: ON_CHAIN_STATE_IS_HEALTHY");
 
         config.state = PoolState.PAUSED;
         config.lastPauseTimestamp = block.timestamp;
         config.consecutivePauses += 1;
 
-        // Atomically invoke pool receiver pause hook to halt swaps / LP burns
-        (bool success, ) = config.poolReceiver.call(
-            abi.encodeWithSignature("emergencyPause()")
-        );
-        require(success, "HOOK_EXECUTION_FAILED");
+        // Atomically halt the managed pool/vault wrapper
+        (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyPause()"));
+        require(success, "WRAPPER_HOOK_FAILED");
 
-        emit EmergencyPauseTriggered(poolAddress, currentK, dropBps, msg.sender);
+        emit EmergencyPauseTriggered(targetPool, currentSqrtPriceX96, recordedDeviationBps, msg.sender);
     }
 
     /// @notice Unpause can ONLY be executed by Gnosis Safe 3/5 Multisig after forensic review
-    function unpausePool(address poolAddress, uint256 newReserve0, uint256 newReserve1) external onlyRole(UNPAUSER_ROLE) {
-        PoolConfig storage config = pools[poolAddress];
-        require(config.isRegistered, "POOL_NOT_REGISTERED");
-        require(config.state == PoolState.PAUSED, "POOL_NOT_PAUSED");
+    function unpauseTarget(address targetPool) external onlyRole(UNPAUSER_ROLE) {
+        TargetConfig storage config = targets[targetPool];
+        require(config.isRegistered, "NOT_REGISTERED");
+        require(config.state == PoolState.PAUSED, "NOT_PAUSED");
 
-        uint256 newK = InvariantChecker.computeK(newReserve0, newReserve1);
-        require(newK > 0, "INVALID_NEW_K");
+        // Recalibrate baseline directly from on-chain state
+        if (config.initialSqrtPriceX96 > 0) {
+            try IUniswapV3Pool(targetPool).slot0() returns (uint160 _sqrtPriceX96, int24, uint16, uint16, uint16, uint8, bool) {
+                config.initialSqrtPriceX96 = _sqrtPriceX96;
+            } catch {}
+        }
+        config.initialReserve0 = IERC20(config.token0).balanceOf(targetPool);
+        config.initialReserve1 = IERC20(config.token1).balanceOf(targetPool);
 
         config.state = PoolState.NORMAL;
-        config.initialK = newK;
-        config.consecutivePauses = 0; // Reset consecutive pauses upon multisig confirmation
+        config.consecutivePauses = 0;
 
-        (bool success, ) = config.poolReceiver.call(
-            abi.encodeWithSignature("emergencyUnpause()")
-        );
+        (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyUnpause()"));
         require(success, "UNPAUSE_HOOK_FAILED");
 
-        emit PoolUnpausedByMultisig(poolAddress, msg.sender);
+        emit TargetUnpausedByMultisig(targetPool, msg.sender);
     }
 
-    /// @notice Timeout degradation: after 24h, pool transitions to orderly emergency wind down
-    /// @dev Does NOT auto-unpause; strictly allows user orderly exit without attacker drainage
-    function activateEmergencyWindDown(address poolAddress) external {
-        PoolConfig storage config = pools[poolAddress];
-        require(config.isRegistered, "POOL_NOT_REGISTERED");
+    /// @notice 24-hour timeout degradation to emergency wind down (no auto-unpause)
+    function activateEmergencyWindDown(address targetPool) external {
+        TargetConfig storage config = targets[targetPool];
+        require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.PAUSED, "NOT_PAUSED");
         require(block.timestamp >= config.lastPauseTimestamp + EMERGENCY_TIMEOUT, "TIMEOUT_NOT_REACHED");
 
         config.state = PoolState.EMERGENCY_WIND_DOWN;
 
-        (bool success, ) = config.poolReceiver.call(
-            abi.encodeWithSignature("emergencyWindDown()")
-        );
+        (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyWindDown()"));
         require(success, "WIND_DOWN_HOOK_FAILED");
 
-        emit EmergencyWindDownActivated(poolAddress, block.timestamp);
+        emit EmergencyWindDownActivated(targetPool, block.timestamp);
     }
 
-    /// @notice Non-custodial verification: contract rejects direct ETH and has 0 token custody
+    /// @notice Strictly non-custodial: rejects direct ETH transfers
     receive() external payable {
-        revert("NON_CUSTODIAL: ETH_REJECTED");
+        revert("NON_CUSTODIAL: ZERO_ETH_ACCEPTED");
     }
 }

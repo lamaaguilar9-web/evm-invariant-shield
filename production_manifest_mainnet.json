@@ -1,7 +1,7 @@
 {
   "network": "Ethereum Mainnet",
   "chainId": 1,
-  "specification": "EVM Invariant Shield v1.0.0",
+  "specification": "EVM Invariant Shield v1.1.0 (Audit Hardened)",
   "circuitBreaker": {
     "latencyTargetMs": 45,
     "maxConsecutivePauses": 2,

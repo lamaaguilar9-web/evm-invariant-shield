@@ -89,7 +89,7 @@ Autonomous, ultra-low latency (<45ms) non-custodial circuit breaker and invarian
 | **Audit Status** | **PRODUCTION READY** | Certified |
 | **Formal Test Suite** | **7 / 7 Passing** | 100% |
 | **Dedicated Port** | **Port 5057** | Isolated |
-| **Live Command Center** | `http://2.25.121.124:5057` | 24/7 Active |
+| **Live Command Center** | `https://sentinel.evmshield.io (Internal Telemetry Port 5057)` | 24/7 Active |
 | **Contract Balance** | **0.00 ETH / 0 Tokens** | Non-Custodial |
 
 ---
