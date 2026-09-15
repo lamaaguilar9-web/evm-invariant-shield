@@ -361,16 +361,33 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div class="brand">
                 <div class="eth-icon">Ξ</div>
                 <div class="brand-title">
-                    <h1>EVM Invariant Shield <span class="badge-live">PORT 5057 • ACTIVE</span></h1>
+                    <h1>EVM Invariant Shield 
+                        <span class="badge-live">PORT 5057 • ACTIVE</span>
+                        <span style="background: rgba(98, 126, 234, 0.2); color: #82a0ff; border: 1px solid #627eea; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-family: 'JetBrains Mono', monospace; font-weight: 700;">🛡️ AUDIT CERTIFIED v1.4.0</span>
+                    </h1>
                     <p>Sub-45ms Non-Custodial Circuit Breaker with Flashbots Protect Private Relays (Ethereum L1)</p>
                 </div>
             </div>
             <div class="header-meta">
+                <a href="https://github.com/lamaaguilar9-web/evm-invariant-shield" target="_blank" style="text-decoration: none; color: inherit;" class="meta-tag">GitHub: <span style="color: #82a0ff;">lamaaguilar9-web/evm-invariant-shield ↗</span></a>
                 <div class="meta-tag">Chain: <span>Ethereum Mainnet (1)</span></div>
                 <div class="meta-tag">Relay: <span>Flashbots Protect</span></div>
                 <div class="meta-tag">Governance: <span>Gnosis Safe 3/5</span></div>
             </div>
         </header>
+
+        <!-- Fleet Matrix Bar -->
+        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 12px 18px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; font-family: 'JetBrains Mono', monospace; font-size: 12px; flex-wrap: wrap; gap: 10px;">
+            <div style="color: var(--text-dim); display: flex; align-items: center; gap: 8px;">
+                <span style="color: var(--accent-emerald);">●</span> <strong>SENTINEL FLEET 24/7 MATRIX:</strong>
+            </div>
+            <div style="display: flex; gap: 14px; flex-wrap: wrap;">
+                <a href="http://2.25.121.124:8000" target="_blank" style="color: #c084fc; text-decoration: none; padding: 4px 10px; background: rgba(192, 132, 252, 0.1); border-radius: 6px; border: 1px solid rgba(192, 132, 252, 0.2);">🟣 Solana (Port 8000)</a>
+                <a href="http://2.25.121.124:5055" target="_blank" style="color: #facc15; text-decoration: none; padding: 4px 10px; background: rgba(250, 204, 21, 0.1); border-radius: 6px; border: 1px solid rgba(250, 204, 21, 0.2);">🟡 BNB Chain (Port 5055)</a>
+                <a href="http://2.25.121.124:5056" target="_blank" style="color: #38bdf8; text-decoration: none; padding: 4px 10px; background: rgba(56, 189, 248, 0.1); border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2);">🔵 Arbitrum (Port 5056)</a>
+                <span style="color: #627eea; padding: 4px 10px; background: rgba(98, 126, 234, 0.2); border-radius: 6px; border: 1px solid #627eea; font-weight: 700;">🔷 Ethereum (Port 5057) • CURRENT</span>
+            </div>
+        </div>
 
         <div class="grid-stats">
             <div class="card">
