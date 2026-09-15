@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./libraries/FullMath.sol";
 import "./libraries/UniswapV3InvariantChecker.sol";
 import "./interfaces/IUniswapV3Pool.sol";
+import "./interfaces/AggregatorV3Interface.sol";
 
-/// @title EVM Invariant Shield v1.2.0 - Production Certified Circuit Breaker
-/// @notice Autonomous non-custodial protection for Uniswap v3 liquidity vaults and position routers
-/// @dev Immune to donation attacks: queries internal slot0 (sqrtPriceX96 & tick) and active liquidity L directly on-chain
+/// @title EVM Invariant Shield v1.4.0 - Circuit Breaker con Verificación On-Chain
 contract EVMInvariantShield {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant UNPAUSER_ROLE = keccak256("UNPAUSER_ROLE");
@@ -17,30 +15,30 @@ contract EVMInvariantShield {
 
     uint256 public constant MAX_CONSECUTIVE_PAUSES = 2;
     uint256 public constant EMERGENCY_TIMEOUT = 24 hours;
-    uint256 public constant DEFAULT_MAX_PRICE_DROP_BPS = 1500; // 15% price crash
-    int24 public constant DEFAULT_MAX_TICK_DROP = 1625;        // ~15% tick deviation
+    uint256 public constant DEFAULT_MAX_DEVIATION_BPS = 1500; // 15%
+    int24 public constant DEFAULT_MAX_TICK_DELTA = 1625;
 
     enum PoolState { NORMAL, PAUSED, EMERGENCY_WIND_DOWN }
 
     struct TargetConfig {
         bool isRegistered;
         PoolState state;
-        address poolReceiver; // Vault / Managed Position Manager
+        address poolReceiver;
+        address chainlinkFeed;
         uint160 initialSqrtPriceX96;
         int24 initialTick;
-        uint128 initialLiquidity;
         uint256 lastPauseTimestamp;
         uint256 consecutivePauses;
     }
 
     mapping(address => TargetConfig) public targets;
 
-    event TargetRegistered(address indexed targetPool, address indexed poolReceiver, uint160 initialSqrtPriceX96, int24 initialTick);
-    event EmergencyPauseTriggered(address indexed targetPool, uint160 currentSqrtPriceX96, uint256 priceDropBps, address indexed triggeredBy);
+    event TargetRegistered(address indexed targetPool, address indexed poolReceiver, address chainlinkFeed);
+    event EmergencyPauseTriggered(address indexed targetPool, uint160 currentSqrtPriceX96, address indexed triggeredBy);
     event TargetUnpausedByMultisig(address indexed targetPool, address indexed unpausedBy);
     event EmergencyWindDownActivated(address indexed targetPool, uint256 timestamp);
-    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
-    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+    event RoleGranted(bytes32 indexed role, address indexed account);
+    event RoleRevoked(bytes32 indexed role, address indexed account);
 
     modifier onlyRole(bytes32 role) {
         require(_roles[role][msg.sender], "ACCESS_CONTROL: SENDER_LACKS_ROLE");
@@ -52,128 +50,109 @@ contract EVMInvariantShield {
         _roles[PAUSER_ROLE][sentinelBot] = true;
         _roles[UNPAUSER_ROLE][gnosisSafeMultisig] = true;
         _roles[DEFAULT_ADMIN_ROLE][gnosisSafeMultisig] = true;
-        emit RoleGranted(PAUSER_ROLE, sentinelBot, msg.sender);
-        emit RoleGranted(UNPAUSER_ROLE, gnosisSafeMultisig, msg.sender);
-        emit RoleGranted(DEFAULT_ADMIN_ROLE, gnosisSafeMultisig, msg.sender);
-    }
 
-    function hasRole(bytes32 role, address account) public view returns (bool) {
-        return _roles[role][account];
+        emit RoleGranted(PAUSER_ROLE, sentinelBot);
+        emit RoleGranted(UNPAUSER_ROLE, gnosisSafeMultisig);
+        emit RoleGranted(DEFAULT_ADMIN_ROLE, gnosisSafeMultisig);
     }
 
     function grantRole(bytes32 role, address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _roles[role][account] = true;
-        emit RoleGranted(role, account, msg.sender);
+        emit RoleGranted(role, account);
     }
 
     function revokeRole(bytes32 role, address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _roles[role][account] = false;
-        emit RoleRevoked(role, account, msg.sender);
+        emit RoleRevoked(role, account);
     }
 
-    /// @notice Registers target pool by querying internal slot0 state directly on-chain
     function registerTarget(
         address targetPool,
-        address poolReceiver
+        address poolReceiver,
+        address chainlinkFeed
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(targetPool != address(0) && poolReceiver != address(0), "INVALID_ADDRESS");
         require(!targets[targetPool].isRegistered, "ALREADY_REGISTERED");
 
         (uint160 sqrtPriceX96, int24 tick,,,,,) = IUniswapV3Pool(targetPool).slot0();
-        uint128 activeLiquidity = IUniswapV3Pool(targetPool).liquidity();
-
         require(sqrtPriceX96 > 0, "INVALID_SQRT_PRICE");
 
         targets[targetPool] = TargetConfig({
             isRegistered: true,
             state: PoolState.NORMAL,
             poolReceiver: poolReceiver,
+            chainlinkFeed: chainlinkFeed,
             initialSqrtPriceX96: sqrtPriceX96,
             initialTick: tick,
-            initialLiquidity: activeLiquidity,
             lastPauseTimestamp: 0,
             consecutivePauses: 0
         });
 
-        emit TargetRegistered(targetPool, poolReceiver, sqrtPriceX96, tick);
+        emit TargetRegistered(targetPool, poolReceiver, chainlinkFeed);
     }
 
-    /// @notice HARDENED TRIGGER: Zero external parameters. State is read 100% on-chain from slot0.
-    /// @dev Immune to donation attacks and parameter injection. Reverts if on-chain state has not suffered >15% drop.
     function triggerEmergencyPause(address targetPool) external onlyRole(PAUSER_ROLE) {
         TargetConfig storage config = targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.NORMAL, "NOT_NORMAL");
         require(config.consecutivePauses < MAX_CONSECUTIVE_PAUSES, "MAX_PAUSES_REACHED");
 
-        // 1. Direct on-chain slot0 read (Internal pool state, cannot be spoofed by token transfers)
         (uint160 currentSqrtPriceX96, int24 currentTick,,,,,) = IUniswapV3Pool(targetPool).slot0();
 
-        // 2. Exact quadratic price drop verification (P = sqrtP^2 / 2^192)
-        (bool dropExceeded, uint256 priceDropBps) = UniswapV3InvariantChecker.checkExactPriceDrop(
+        (bool dropExceeded, ) = UniswapV3InvariantChecker.checkExactPriceDrop(
             config.initialSqrtPriceX96,
             currentSqrtPriceX96,
-            DEFAULT_MAX_PRICE_DROP_BPS
+            DEFAULT_MAX_DEVIATION_BPS
         );
 
-        // 3. Secondary tick delta verification (ln(0.85)/ln(1.0001) >= 1625 ticks)
         (bool tickExceeded, ) = UniswapV3InvariantChecker.checkTickDelta(
             config.initialTick,
             currentTick,
-            DEFAULT_MAX_TICK_DROP
+            DEFAULT_MAX_TICK_DELTA
         );
 
-        // Enforce cryptographic on-chain proof of exploit
-        require(dropExceeded || tickExceeded, "INVARIANT_DROP_NOT_EXCEEDED: ON_CHAIN_STATE_IS_HEALTHY");
+        require(dropExceeded || tickExceeded, "INVARIANT_HEALTHY");
 
         config.state = PoolState.PAUSED;
         config.lastPauseTimestamp = block.timestamp;
         config.consecutivePauses += 1;
 
-        // Atomically halt the managed pool/vault wrapper
         (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyPause()"));
-        require(success, "WRAPPER_HOOK_FAILED");
+        require(success, "WRAPPER_PAUSE_FAILED");
 
-        emit EmergencyPauseTriggered(targetPool, currentSqrtPriceX96, priceDropBps, msg.sender);
+        emit EmergencyPauseTriggered(targetPool, currentSqrtPriceX96, msg.sender);
     }
 
-    /// @notice Unpause can ONLY be executed by Gnosis Safe 3/5 Multisig after forensic review
-    function unpauseTarget(address targetPool) external onlyRole(UNPAUSER_ROLE) {
-        _executeUnpause(targetPool);
-    }
-
-    /// @notice Hardened unpause with on-chain price assertion: Prevents unpausing while market remains collapsed
-    function unpauseTargetWithMinPrice(
+    /// @notice Despausado reforzado con validación de oráculo Chainlink on-chain
+    function unpauseTargetWithOracle(
         address targetPool,
-        uint160 minAcceptableSqrtPrice
+        uint160 minAcceptableSqrtPrice,
+        uint256 maxOracleAge
     ) external onlyRole(UNPAUSER_ROLE) {
-        (uint160 currentSqrtPriceX96,,,,,,) = IUniswapV3Pool(targetPool).slot0();
-        require(currentSqrtPriceX96 >= minAcceptableSqrtPrice, "MARKET_NOT_RESTORED: PRICE_BELOW_MINIMUM");
-        _executeUnpause(targetPool);
-    }
-
-    function _executeUnpause(address targetPool) internal {
         TargetConfig storage config = targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.PAUSED, "NOT_PAUSED");
 
-        // Recalibrate baseline directly from current on-chain slot0
-        (uint160 newSqrtPriceX96, int24 newTick,,,,,) = IUniswapV3Pool(targetPool).slot0();
-        uint128 newLiquidity = IUniswapV3Pool(targetPool).liquidity();
+        (uint160 currentSqrtPriceX96, int24 newTick,,,,,) = IUniswapV3Pool(targetPool).slot0();
+        require(currentSqrtPriceX96 >= minAcceptableSqrtPrice, "MARKET_NOT_RESTORED");
 
-        config.initialSqrtPriceX96 = newSqrtPriceX96;
+        if (config.chainlinkFeed != address(0)) {
+            (, int256 price,, uint256 updatedAt,) = AggregatorV3Interface(config.chainlinkFeed).latestRoundData();
+            require(price > 0, "INVALID_ORACLE_PRICE");
+            require(block.timestamp - updatedAt <= maxOracleAge, "STALE_ORACLE_PRICE");
+        }
+
+        config.initialSqrtPriceX96 = currentSqrtPriceX96;
         config.initialTick = newTick;
-        config.initialLiquidity = newLiquidity;
         config.state = PoolState.NORMAL;
         config.consecutivePauses = 0;
 
         (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyUnpause()"));
-        require(success, "UNPAUSE_HOOK_FAILED");
+        require(success, "WRAPPER_UNPAUSE_FAILED");
 
         emit TargetUnpausedByMultisig(targetPool, msg.sender);
     }
 
-    /// @notice 24-hour timeout degradation to emergency wind down (no auto-unpause)
     function activateEmergencyWindDown(address targetPool) external {
         TargetConfig storage config = targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
@@ -183,12 +162,11 @@ contract EVMInvariantShield {
         config.state = PoolState.EMERGENCY_WIND_DOWN;
 
         (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyWindDown()"));
-        require(success, "WIND_DOWN_HOOK_FAILED");
+        require(success, "WRAPPER_WIND_DOWN_FAILED");
 
         emit EmergencyWindDownActivated(targetPool, block.timestamp);
     }
 
-    /// @notice Strictly non-custodial: rejects direct ETH transfers
     receive() external payable {
         revert("NON_CUSTODIAL: ZERO_ETH_ACCEPTED");
     }
