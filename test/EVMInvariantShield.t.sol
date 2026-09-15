@@ -6,6 +6,12 @@ import "../contracts/ProtectedPoolReceiver.sol";
 import "../contracts/libraries/FullMath.sol";
 import "../contracts/libraries/UniswapV3InvariantChecker.sol";
 
+// Interface for Foundry cheatcodes
+interface Vm {
+    function prank(address) external;
+    function warp(uint256) external;
+}
+
 // Mock MockERC20 for Foundry
 contract MockERC20 {
     string public name;
@@ -45,6 +51,8 @@ contract MockUniswapV3Pool {
 }
 
 contract EVMInvariantShieldTest {
+    Vm internal constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+
     EVMInvariantShield public shield;
     ProtectedPoolReceiver public receiver;
     MockUniswapV3Pool public pool;
@@ -70,39 +78,85 @@ contract EVMInvariantShieldTest {
         receiver.setCircuitBreaker(address(shield));
     }
 
+    // 1. Verificación de la matemática cuadrática exacta
     function test_1_ExactQuadraticPriceDropMath() public pure {
         uint160 initSqrtP = 1000000;
-        // 18% price drop: currentPrice = 0.82 * initialPrice => currentSqrtP = sqrt(0.82) * 1000000 ~= 905538
+        // Caída de precio del 18%: P_curr = 0.82 * P_init => sqrtP = sqrt(0.82) * 1000000 ~= 905538
         uint160 currSqrtP = 905538;
         (bool dropExceeded, uint256 dropBps) = UniswapV3InvariantChecker.checkExactPriceDrop(
             initSqrtP, currSqrtP, 1500
         );
-        require(dropExceeded, "TEST1_FAILED: Drop should exceed 1500 bps");
-        require(dropBps >= 1800, "TEST1_FAILED: Exact drop should be ~1800 bps");
+        require(dropExceeded, "TEST1_FAILED: El drop debio superar 1500 bps");
+        require(dropBps >= 1800, "TEST1_FAILED: La caida exacta debio ser ~1800 bps");
     }
 
+    // 2. Inmunidad absoluta contra Donation Attacks
     function test_2_DonationAttackImmunity() public {
-        // Transferring millions of tokens directly to the pool DOES NOT alter slot0
         token0.mint(address(pool), 100_000 ether);
         token1.mint(address(pool), 350_000_000 * 1e6);
 
-        // slot0 is unaffected
+        // slot0 no se inmuta ante transferencias directas de tokens
         (uint160 sqrtP,,,,,,) = pool.slot0();
-        require(sqrtP == 468494958188145244569501538304, "Slot0 manipulated!");
+        require(sqrtP == 468494958188145244569501538304, "Slot0 no debe cambiar!");
     }
 
+    // 3. Salida ordenada (orderlyWithdraw) con pagos proporcionales y ejecución real
     function test_3_OrderlyWithdrawalProportionalPayout() public {
         token0.mint(address(receiver), 100 ether);
         token1.mint(address(receiver), 350_000 * 1e6);
 
+        // Vault manager emite 50 LP a Alice y 50 LP a Bob
         receiver.mintLp(alice, 50);
-        receiver.mintLp(address(0x9999), 50); // Total 100 LP shares
+        receiver.mintLp(address(0x9999), 50); // 100 LP shares totales
 
-        // Circuit breaker triggers wind down
+        // Circuit breaker activa la liquidación ordenada
         receiver.emergencyWindDown();
 
-        // Alice burns 50 LP shares (50%)
-        // She receives exactly 50 WETH and 175,000 USDC
-        require(receiver.lpBalances(alice) == 50, "Alice LP balance wrong");
+        // Alice ejecuta el retiro ordenado de sus 50 LP shares
+        vm.prank(alice);
+        (uint256 a0, uint256 a1) = receiver.orderlyWithdraw(50);
+
+        require(a0 == 50 ether, "Payout a0 incorrecto");
+        require(a1 == 175_000 * 1e6, "Payout a1 incorrecto");
+        require(receiver.lpBalances(alice) == 0, "LP no quemado");
+        require(token0.balanceOf(alice) == 50 ether, "Payout token0 incorrecto");
+        require(token1.balanceOf(alice) == 175_000 * 1e6, "Payout token1 incorrecto");
+        require(receiver.totalLpSupply() == 50, "Total LP supply incorrecto");
+    }
+
+    // 4. Verificación de control de acceso en mintLp (Inmune a emisión arbitraria)
+    function test_4_UnauthorizedMintLpReverts() public {
+        address attacker = address(0x6666);
+        vm.prank(attacker);
+        try receiver.mintLp(attacker, 1_000_000) {
+            revert("TEST4_FAILED: Attacker should not be able to mint LP");
+        } catch Error(string memory reason) {
+            require(
+                keccak256(bytes(reason)) == keccak256(bytes("NOT_LIQUIDITY_MANAGER")),
+                "Unexpected revert reason"
+            );
+        }
+    }
+
+    // 5. Salvaguarda en unpauseTarget con verificación de precio mínimo de mercado
+    function test_5_UnpauseRevertsIfMarketNotRestored() public {
+        shield.registerTarget(address(pool), address(receiver));
+
+        // Simular caída del 20% en el pool
+        pool.setSlot0(894427, 79000);
+
+        vm.prank(sentinelBot);
+        shield.triggerEmergencyPause(address(pool));
+
+        // Multifirma intenta despausar cuando el precio aún está deprimido
+        vm.prank(gnosisSafe);
+        try shield.unpauseTargetWithMinPrice(address(pool), 400000000000000000000000000000) {
+            revert("TEST5_FAILED: Depressed pool unpause should revert");
+        } catch Error(string memory reason) {
+            require(
+                keccak256(bytes(reason)) == keccak256(bytes("MARKET_NOT_RESTORED: PRICE_BELOW_MINIMUM")),
+                "Unexpected revert reason"
+            );
+        }
     }
 }

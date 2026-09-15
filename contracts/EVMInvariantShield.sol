@@ -139,6 +139,20 @@ contract EVMInvariantShield {
 
     /// @notice Unpause can ONLY be executed by Gnosis Safe 3/5 Multisig after forensic review
     function unpauseTarget(address targetPool) external onlyRole(UNPAUSER_ROLE) {
+        _executeUnpause(targetPool);
+    }
+
+    /// @notice Hardened unpause with on-chain price assertion: Prevents unpausing while market remains collapsed
+    function unpauseTargetWithMinPrice(
+        address targetPool,
+        uint160 minAcceptableSqrtPrice
+    ) external onlyRole(UNPAUSER_ROLE) {
+        (uint160 currentSqrtPriceX96,,,,,,) = IUniswapV3Pool(targetPool).slot0();
+        require(currentSqrtPriceX96 >= minAcceptableSqrtPrice, "MARKET_NOT_RESTORED: PRICE_BELOW_MINIMUM");
+        _executeUnpause(targetPool);
+    }
+
+    function _executeUnpause(address targetPool) internal {
         TargetConfig storage config = targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.PAUSED, "NOT_PAUSED");

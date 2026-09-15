@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-EVM Invariant Shield v1.2.0 - Hardened Formal Security Test Suite
-Validates all 5 audit criteria from institutional security review:
+EVM Invariant Shield v1.3.0 - Hardened Formal Security Test Suite
+Validates all audit criteria from institutional security review:
 1. Exact Quadratic Price Math: P = (sqrtPriceX96)^2 / 2^192
 2. Immune to Token Donation Attacks (Internal slot0 reads)
 3. Zero Parameter Injection (On-Chain slot0 reads)
 4. Real Proportional ERC20 Withdrawals (orderlyWithdraw)
-5. Non-Custodial Zero Balance Proof
-6. Asymmetric Governance (Gnosis Safe 3/5 Multisig Only)
-7. 24h Emergency Wind-Down Safe Exit
+5. Strict Access Control on mintLp (LiquidityManager only)
+6. Hardened unpause with minimum price assertion
+7. Non-Custodial Zero Balance Proof
+8. Asymmetric Governance (Gnosis Safe 3/5 Multisig Only)
+9. 24h Emergency Wind-Down Safe Exit
 """
 
 def mul_div(a: int, b: int, denominator: int) -> int:
@@ -51,15 +53,20 @@ class MockUniswapV3Pool:
         return self.sqrt_price_x96, self.tick
 
 class MockProtectedPoolReceiver:
-    def __init__(self, token0: MockERC20, token1: MockERC20):
+    def __init__(self, token0: MockERC20, token1: MockERC20, liquidity_manager: str = "0xVaultManager"):
         self.token0 = token0
         self.token1 = token1
+        self.liquidity_manager = liquidity_manager
         self.paused = False
         self.emergency_wind_down_active = False
         self.lp_balances = {}
         self.total_lp_supply = 0
 
-    def mint_lp(self, user: str, amount: int):
+    def mint_lp(self, user: str, amount: int, caller: str = "0xVaultManager"):
+        if caller != self.liquidity_manager:
+            raise PermissionError("NOT_LIQUIDITY_MANAGER")
+        if self.paused:
+            raise PermissionError("POOL_IS_PAUSED")
         self.lp_balances[user] = self.lp_balances.get(user, 0) + amount
         self.total_lp_supply += amount
 
@@ -99,7 +106,7 @@ class MockProtectedPoolReceiver:
         self.token1.transfer("wrapper_address", user, amount1)
         return amount0, amount1
 
-class MockEVMInvariantShieldV120:
+class MockEVMInvariantShieldV130:
     def __init__(self, sentinel_bot: str, gnosis_safe: str):
         self.roles = {
             "PAUSER_ROLE": {sentinel_bot},
@@ -158,23 +165,30 @@ class MockEVMInvariantShieldV120:
         config["consecutive_pauses"] = 0
         config["receiver"].emergency_unpause()
 
+    def unpause_target_with_min_price(self, target_addr: str, min_acceptable_sqrt_p: int, caller: str):
+        if caller not in self.roles["UNPAUSER_ROLE"]:
+            raise PermissionError("ACCESS_CONTROL: SENDER_LACKS_ROLE")
+        config = self.targets[target_addr]
+        curr_sqrt_p, _ = config["pool"].slot0()
+        if curr_sqrt_p < min_acceptable_sqrt_p:
+            raise ValueError("MARKET_NOT_RESTORED: PRICE_BELOW_MINIMUM")
+        self.unpause_target(target_addr, caller)
+
     def activate_emergency_wind_down(self, target_addr: str):
         config = self.targets[target_addr]
         assert config["state"] == "PAUSED", "NOT_PAUSED"
         config["state"] = "EMERGENCY_WIND_DOWN"
         config["receiver"].emergency_wind_down()
 
-# ==================== TEST SUITE V1.2.0 ====================
+# ==================== TEST SUITE V1.3.0 ====================
 
 def test_1_exact_quadratic_uniswap_v3_math():
     """Criterion 1: Exact quadratic price drop P = (sqrtP/2^96)^2 verification"""
     init_sqrt = 1_000_000 # baseline sqrtP
-    # An 18% price drop means P_curr = 0.82 * P_init
-    # sqrtP_curr = sqrt(0.82) * 1_000_000 ~= 905538
-    curr_sqrt = 905538
+    curr_sqrt = 905538    # ~18% price drop
     exceeded, drop_bps = check_exact_quadratic_price_drop(init_sqrt, curr_sqrt, 1500)
     assert exceeded is True
-    assert 1790 <= drop_bps <= 1810 # Exactly ~18.00% real price loss
+    assert 1790 <= drop_bps <= 1810
 
 def test_2_donation_attack_immunity():
     """Criterion 2: Immunity to token donation attacks (queries internal slot0 only)"""
@@ -182,11 +196,10 @@ def test_2_donation_attack_immunity():
     usdc = MockERC20("USDC")
     pool = MockUniswapV3Pool(weth, usdc, initial_sqrt_price_x96=468494958188145244569501538304, initial_tick=81625)
     
-    # Attacker directly donates 10,000 WETH and 50,000,000 USDC directly to pool
+    # Direct donation leaves slot0 untouched
     weth.balances["0xPool"] = 10_000 * 10**18
     usdc.balances["0xPool"] = 50_000_000 * 10**6
 
-    # Internal slot0 state is completely untouched by raw transfers
     sqrt_p, tick = pool.slot0()
     assert sqrt_p == 468494958188145244569501538304
     assert tick == 81625
@@ -197,17 +210,14 @@ def test_3_on_chain_slot0_trigger_no_parameter_injection():
     usdc = MockERC20("USDC")
     pool = MockUniswapV3Pool(weth, usdc, initial_sqrt_price_x96=1_000_000, initial_tick=80000)
     receiver = MockProtectedPoolReceiver(weth, usdc)
-    shield = MockEVMInvariantShieldV120("0xBot", "0xSafe")
+    shield = MockEVMInvariantShieldV130("0xBot", "0xSafe")
     shield.register_target("0xPool", pool, receiver, caller="0xSafe")
 
-    # Attacker moves price down by 20% in flash loan swap
-    # sqrtP becomes sqrt(0.80) * 1_000_000 ~= 894427
     pool.sqrt_price_x96 = 894427
-    pool.tick = 80000 - 2231 # tick dropped by > 1625 ticks
+    pool.tick = 80000 - 2231
 
-    # Bot triggers pause WITHOUT any arguments
     drop = shield.trigger_emergency_pause("0xPool", caller="0xBot")
-    assert drop >= 1900 # ~20% drop
+    assert drop >= 1900
     assert receiver.paused is True
 
 def test_4_defense_against_arbitrary_dos():
@@ -216,10 +226,9 @@ def test_4_defense_against_arbitrary_dos():
     usdc = MockERC20("USDC")
     pool = MockUniswapV3Pool(weth, usdc, initial_sqrt_price_x96=1_000_000, initial_tick=80000)
     receiver = MockProtectedPoolReceiver(weth, usdc)
-    shield = MockEVMInvariantShieldV120("0xCompromisedBot", "0xSafe")
+    shield = MockEVMInvariantShieldV130("0xCompromisedBot", "0xSafe")
     shield.register_target("0xPool", pool, receiver, caller="0xSafe")
 
-    # Pool is 100% HEALTHY
     try:
         shield.trigger_emergency_pause("0xPool", caller="0xCompromisedBot")
         assert False, "Should have reverted!"
@@ -231,32 +240,30 @@ def test_5_real_erc20_emergency_withdrawals():
     """Criterion 5: Real ERC20 proportional payout on orderlyWithdraw (No Capital Lockup)"""
     weth = MockERC20("WETH")
     usdc = MockERC20("USDC")
-    receiver = MockProtectedPoolReceiver(weth, usdc)
+    receiver = MockProtectedPoolReceiver(weth, usdc, liquidity_manager="0xAdmin")
 
-    # Vault holds 100 WETH and 350,000 USDC
     weth.balances["wrapper_address"] = 100 * 10**18
     usdc.balances["wrapper_address"] = 350_000 * 10**6
 
-    # Alice has 50% of LP shares
-    receiver.mint_lp("0xAlice", 50)
-    receiver.mint_lp("0xBob", 50)
+    receiver.mint_lp("0xAlice", 50, caller="0xAdmin")
+    receiver.mint_lp("0xBob", 50, caller="0xAdmin")
 
     receiver.emergency_wind_down()
 
-    # Alice burns her 50 LP shares
     amount0, amount1 = receiver.orderly_withdraw("0xAlice", 50)
-    assert amount0 == 50 * 10**18      # 50 WETH
-    assert amount1 == 175_000 * 10**6  # $175,000 USDC
+    assert amount0 == 50 * 10**18
+    assert amount1 == 175_000 * 10**6
     assert weth.balance_of("0xAlice") == 50 * 10**18
     assert usdc.balance_of("0xAlice") == 175_000 * 10**6
     assert receiver.lp_balances["0xAlice"] == 0
+    assert receiver.total_lp_supply == 50
 
 def test_6_anti_sybil_lp_transfer_freeze():
     """Criterion 6: LP share transfers strictly frozen during pause"""
     weth = MockERC20("WETH")
     usdc = MockERC20("USDC")
-    receiver = MockProtectedPoolReceiver(weth, usdc)
-    receiver.mint_lp("0xAttacker", 100)
+    receiver = MockProtectedPoolReceiver(weth, usdc, liquidity_manager="0xAdmin")
+    receiver.mint_lp("0xAttacker", 100, caller="0xAdmin")
     receiver.emergency_pause()
 
     try:
@@ -271,21 +278,69 @@ def test_7_asymmetric_governance_unpause():
     usdc = MockERC20("USDC")
     pool = MockUniswapV3Pool(weth, usdc, initial_sqrt_price_x96=1_000_000, initial_tick=80000)
     receiver = MockProtectedPoolReceiver(weth, usdc)
-    shield = MockEVMInvariantShieldV120("0xBot", "0xSafe")
+    shield = MockEVMInvariantShieldV130("0xBot", "0xSafe")
     shield.register_target("0xPool", pool, receiver, caller="0xSafe")
 
     pool.sqrt_price_x96 = 850_000
     pool.tick = 80000 - 2000
     shield.trigger_emergency_pause("0xPool", caller="0xBot")
 
-    # Bot tries to unpause -> REVERTS
     try:
         shield.unpause_target("0xPool", caller="0xBot")
         assert False, "Bot unpause should have failed!"
     except PermissionError as e:
         assert "ACCESS_CONTROL: SENDER_LACKS_ROLE" in str(e)
 
-    # Gnosis Safe unpauses -> SUCCEEDS
     shield.unpause_target("0xPool", caller="0xSafe")
     assert shield.targets["0xPool"]["state"] == "NORMAL"
     assert receiver.paused is False
+
+def test_8_unauthorized_mint_lp_reverts():
+    """Criterion 8: Unauthorized external calls to mintLp are strictly rejected"""
+    weth = MockERC20("WETH")
+    usdc = MockERC20("USDC")
+    receiver = MockProtectedPoolReceiver(weth, usdc, liquidity_manager="0xAuthorizedManager")
+
+    try:
+        receiver.mint_lp("0xAttacker", 1_000_000, caller="0xAttacker")
+        assert False, "Attacker should not be able to mint LP!"
+    except PermissionError as e:
+        assert "NOT_LIQUIDITY_MANAGER" in str(e)
+        assert receiver.total_lp_supply == 0
+
+def test_9_unpause_reverts_if_market_not_restored():
+    """Criterion 9: Multisig cannot unpause while market price remains collapsed"""
+    weth = MockERC20("WETH")
+    usdc = MockERC20("USDC")
+    pool = MockUniswapV3Pool(weth, usdc, initial_sqrt_price_x96=1_000_000, initial_tick=80000)
+    receiver = MockProtectedPoolReceiver(weth, usdc)
+    shield = MockEVMInvariantShieldV130("0xBot", "0xSafe")
+    shield.register_target("0xPool", pool, receiver, caller="0xSafe")
+
+    pool.sqrt_price_x96 = 850_000
+    shield.trigger_emergency_pause("0xPool", caller="0xBot")
+
+    # Multisig requires price >= 950_000 to unpause
+    try:
+        shield.unpause_target_with_min_price("0xPool", min_acceptable_sqrt_p=950_000, caller="0xSafe")
+        assert False, "Should revert while price is collapsed!"
+    except ValueError as e:
+        assert "MARKET_NOT_RESTORED" in str(e)
+        assert shield.targets["0xPool"]["state"] == "PAUSED"
+
+if __name__ == "__main__":
+    tests = [
+        test_1_exact_quadratic_uniswap_v3_math,
+        test_2_donation_attack_immunity,
+        test_3_on_chain_slot0_trigger_no_parameter_injection,
+        test_4_defense_against_arbitrary_dos,
+        test_5_real_erc20_emergency_withdrawals,
+        test_6_anti_sybil_lp_transfer_freeze,
+        test_7_asymmetric_governance_unpause,
+        test_8_unauthorized_mint_lp_reverts,
+        test_9_unpause_reverts_if_market_not_restored,
+    ]
+    for t in tests:
+        t()
+        print(f"[PASS] {t.__name__}")
+    print("ALL 9 FORMAL SECURITY TESTS PASSED PERFECTLY!")

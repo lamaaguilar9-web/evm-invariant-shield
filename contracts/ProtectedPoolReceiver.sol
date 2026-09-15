@@ -7,6 +7,7 @@ import "./interfaces/IERC20.sol";
 /// @notice Implements atomic circuit breaker pause, anti-Sybil LP freeze, and non-custodial emergency withdrawals
 contract ProtectedPoolReceiver {
     address public circuitBreaker;
+    address public liquidityManager;
     address public immutable token0;
     address public immutable token1;
 
@@ -27,6 +28,11 @@ contract ProtectedPoolReceiver {
         _;
     }
 
+    modifier onlyLiquidityManager() {
+        require(msg.sender == liquidityManager, "NOT_LIQUIDITY_MANAGER");
+        _;
+    }
+
     modifier whenNotPaused() {
         require(!paused, "POOL_IS_PAUSED");
         _;
@@ -44,6 +50,7 @@ contract ProtectedPoolReceiver {
         token0 = _token0;
         token1 = _token1;
         circuitBreaker = msg.sender;
+        liquidityManager = msg.sender;
         _reentrancyStatus = 1;
     }
 
@@ -52,7 +59,15 @@ contract ProtectedPoolReceiver {
         circuitBreaker = _breaker;
     }
 
-    function mintLp(address to, uint256 amount) external whenNotPaused {
+    function setLiquidityManager(address _manager) external onlyLiquidityManager {
+        require(_manager != address(0), "INVALID_MANAGER");
+        liquidityManager = _manager;
+    }
+
+    /// @notice Restricted LP minting: Callable only by authorized Liquidity Manager / Vault
+    function mintLp(address to, uint256 amount) external onlyLiquidityManager whenNotPaused {
+        require(to != address(0), "INVALID_RECIPIENT");
+        require(amount > 0, "INVALID_AMOUNT");
         lpBalances[to] += amount;
         totalLpSupply += amount;
     }
