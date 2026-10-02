@@ -12,6 +12,7 @@ interface Vm {
     function startPrank(address) external;
     function stopPrank() external;
     function deal(address, uint256) external;
+    function deal(address, address, uint256) external;
     function warp(uint256) external;
 }
 
@@ -92,36 +93,31 @@ contract ForkIntegrationTest {
         (uint160 initialSqrtP,,,,,,) = IUniswapV3Pool(MAINNET_WETH_USDC_POOL).slot0();
         require(initialSqrtP > 0, "Invalid initial pool state");
 
-        // Fondos para swap de gran volumen
-        vm.deal(address(this), 1000 ether);
+        // Fondos reales ERC20 para swap de gran volumen que desplome el precio
+        vm.deal(MAINNET_USDC, address(this), 100_000_000 * 1e6); // 100M USDC
+        vm.deal(MAINNET_WETH, address(this), 50_000 ether);      // 50k WETH
+        IERC20Extended(MAINNET_USDC).approve(MAINNET_WETH_USDC_POOL, type(uint256).max);
         IERC20Extended(MAINNET_WETH).approve(MAINNET_WETH_USDC_POOL, type(uint256).max);
 
-        // Ejecutar swap adversario masivo que cause desplazamiento abrupto
-        try IUniswapV3Pool(MAINNET_WETH_USDC_POOL).swap(
+        // Ejecutar swap adversario real que desplome el precio de slot0 (vende 20M USDC por WETH)
+        IUniswapV3Pool(MAINNET_WETH_USDC_POOL).swap(
             address(this),
-            false,
-            5000 ether,
+            true,
+            20_000_000 * 1e6,
             4295128740,
             ""
-        ) {} catch {
-            try IUniswapV3Pool(MAINNET_WETH_USDC_POOL).swap(
-                address(this),
-                true,
-                10_000_000 * 1e6,
-                4295128740,
-                ""
-            ) {} catch {}
-        }
+        );
+
+        (uint160 postSqrtP,,,,,,) = IUniswapV3Pool(MAINNET_WETH_USDC_POOL).slot0();
+        require(postSqrtP < initialSqrtP, "Price did not drop after swap");
 
         // Sentinel detecta la alteración y dispara la pausa
         vm.prank(sentinelBot);
-        try shield.triggerEmergencyPause(MAINNET_WETH_USDC_POOL) {
-            EVMInvariantShield.TargetConfig memory cfg = shield.targets(MAINNET_WETH_USDC_POOL);
-            require(cfg.state == EVMInvariantShield.PoolState.PAUSED, "Pool state must be PAUSED");
-            require(receiver.paused(), "Receiver must be paused");
-        } catch Error(string memory reason) {
-            require(bytes(reason).length > 0, "Revert must have explicit reason");
-        }
+        shield.triggerEmergencyPause(MAINNET_WETH_USDC_POOL);
+
+        EVMInvariantShield.TargetConfig memory cfg = shield.targets(MAINNET_WETH_USDC_POOL);
+        require(cfg.state == EVMInvariantShield.PoolState.PAUSED, "Pool state must be PAUSED");
+        require(receiver.paused(), "Receiver must be paused");
     }
 
     /// @notice c) Intento de despausado rechazado si el precio de slot0 o Chainlink no cumple el criterio
@@ -144,8 +140,9 @@ contract ForkIntegrationTest {
     function test_D_OrderlyWithdrawalReturnsTokensToUser() public {
         if (MAINNET_WETH_USDC_POOL.code.length == 0) return;
 
-        // Depositar tokens reales en el vault (ProtectedPoolReceiver)
-        vm.deal(address(receiver), 10 ether);
+        // Depositar tokens ERC20 reales en el vault (ProtectedPoolReceiver)
+        vm.deal(MAINNET_USDC, address(receiver), 200_000 * 1e6); // 200k USDC
+        vm.deal(MAINNET_WETH, address(receiver), 50 ether);       // 50 WETH
 
         vm.startPrank(deployer);
         receiver.mintLp(alice, 50 ether);
@@ -161,6 +158,12 @@ contract ForkIntegrationTest {
         vm.prank(alice);
         (uint256 amount0, uint256 amount1) = receiver.orderlyWithdraw(50 ether);
 
+        require(amount0 > 0, "amount0 must be > 0");
+        require(amount1 > 0, "amount1 must be > 0");
+        require(amount0 == 200_000 * 1e6, "amount0 mismatch");
+        require(amount1 == 50 ether, "amount1 mismatch");
+        require(IERC20Extended(MAINNET_USDC).balanceOf(alice) == amount0, "Alice did not receive USDC");
+        require(IERC20Extended(MAINNET_WETH).balanceOf(alice) == amount1, "Alice did not receive WETH");
         require(receiver.lpBalances(alice) == 0, "Alice LP shares must be burned");
         require(receiver.totalLpSupply() == 0, "Total LP supply must be 0");
     }
