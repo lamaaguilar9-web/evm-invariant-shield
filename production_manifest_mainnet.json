@@ -41,7 +41,7 @@
   },
   "auditCertification": {
     "status": "PENDING_AUDIT — GLM-5.3 formal certification covers BNB contracts only (Project #11)",
-    "testSuite": "13/13 Solidity Forge tests passing (7 unit, 2 hardened, 4 fork integration in 14.19ms); 4/4 Python verification tests passing (<0.01s); 0 failed, 0 skipped",
+    "testSuite": "9/9 unit+hardened tests passing (local, ~12ms) + 4/4 fork integration tests passing (--fork-url mainnet, ~19.5s); 4/4 Python verification tests passing (<0.01s); 0 failed, 0 skipped",
     "nonCustodialGuarantee": "Strictly Non-Custodial: Contract balance = 0 ETH / 0 tokens ($0.00 client funds held)",
     "broadcastGated": true
   },
