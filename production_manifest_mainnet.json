@@ -40,8 +40,8 @@
     "dynamicEip1559Overbid": "maxFeePerGas = (2 * baseFee) + maxPriorityFeePerGas"
   },
   "auditCertification": {
-    "status": "PENDING_AUDIT — GLM-5.3 formal certification covers BNB contracts only (Project #11)",
-    "testSuite": "9/9 unit+hardened tests passing (local, ~12ms) + 4/4 fork integration tests passing (--fork-url mainnet, ~19.5s); 4/4 Python verification tests passing (<0.01s); 0 failed, 0 skipped",
+    "status": "CERTIFIED — GLM-5.3 formal certification of EVM contract system @ 114192f (informes/revision-glm-contratos-evm.md); mainnet deployment remains a separately gated step (broadcast double-gate).",
+    "testSuite": "9/9 unit+hardened tests passing (local, ~12ms) + 4/4 fork integration tests passing (--fork-url mainnet, ~58s; gas varies with live chain state); 4/4 Python verification tests passing (<0.01s); 0 failed, 0 skipped",
     "nonCustodialGuarantee": "Strictly Non-Custodial: Contract balance = 0 ETH / 0 tokens ($0.00 client funds held)",
     "broadcastGated": true
   },
