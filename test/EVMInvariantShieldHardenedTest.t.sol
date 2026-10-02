@@ -135,6 +135,7 @@ contract EVMInvariantShieldHardenedTest {
         shield.triggerEmergencyPause(address(pool));
 
         // Oraculo desactualizado (2 horas de desfase)
+        vm.warp(block.timestamp + 10000);
         feed.setPrice(3500 * 1e8, block.timestamp - 7200);
 
         pool.setSlot0(468494958188145244569501538304, 81625); // Mercado restablecido
