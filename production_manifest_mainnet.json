@@ -4,7 +4,7 @@
   "specification": "EVM Invariant Shield v1.4.0 (Pre-Flight Manifest)",
   "circuitBreaker": {
     "latencyTargetMs": 45,
-    "maxConsecutivePauses": 2,
+    "pauseCooldownSeconds": 900,
     "emergencyTimeoutHours": 24,
     "defaultMaxDropBps": 1500,
     "invariantEngine": "512-bit FullMath Uniswap v3"
@@ -40,8 +40,8 @@
     "dynamicEip1559Overbid": "maxFeePerGas = (2 * baseFee) + maxPriorityFeePerGas"
   },
   "auditCertification": {
-    "status": "PENDING_AUDIT \u2014 GLM-5.3 formal certification covers BNB contracts only (Project #11)",
-    "testSuite": "4/4 Python verification tests passing (<0.01s); Solidity checker restored with 512-bit FullMath",
+    "status": "PENDING_AUDIT — GLM-5.3 formal certification covers BNB contracts only (Project #11)",
+    "testSuite": "13/13 Solidity Forge tests passing (7 unit, 2 hardened, 4 fork integration in 14.19ms); 4/4 Python verification tests passing (<0.01s); 0 failed, 0 skipped",
     "nonCustodialGuarantee": "Strictly Non-Custodial: Contract balance = 0 ETH / 0 tokens ($0.00 client funds held)",
     "broadcastGated": true
   },
