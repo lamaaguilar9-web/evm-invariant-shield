@@ -526,15 +526,16 @@ HTML_CONTENT = """<!DOCTYPE html>
             }
         }
 
-        const LOCAL_AUTH_TOKEN = "sentinel-local-auth";
+        const AUTH_TOKEN = "{{SENTINEL_ADMIN_KEY_INJECTED}}";
 
         async function simulateAttack(poolKey) {
+            const headers = { 'Content-Type': 'application/json' };
+            if (AUTH_TOKEN) {
+                headers['X-Sentinel-Auth'] = AUTH_TOKEN;
+            }
             const res = await fetch('/api/simulate-attack', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Sentinel-Auth': LOCAL_AUTH_TOKEN
-                },
+                headers: headers,
                 body: JSON.stringify({pool: poolKey})
             });
             const data = await res.json();
@@ -556,12 +557,13 @@ HTML_CONTENT = """<!DOCTYPE html>
         }
 
         async function resetPool(poolKey) {
+            const headers = { 'Content-Type': 'application/json' };
+            if (AUTH_TOKEN) {
+                headers['X-Sentinel-Auth'] = AUTH_TOKEN;
+            }
             const res = await fetch('/api/reset-pool', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Sentinel-Auth': LOCAL_AUTH_TOKEN
-                },
+                headers: headers,
                 body: JSON.stringify({pool: poolKey})
             });
             const data = await res.json();
@@ -584,11 +586,12 @@ HTML_CONTENT = """<!DOCTYPE html>
 </html>
 """
 
-ADMIN_AUTH_TOKEN = os.environ.get("SENTINEL_ADMIN_KEY", "sentinel-local-auth")
+ADMIN_AUTH_TOKEN = os.environ.get("SENTINEL_ADMIN_KEY")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
-    return HTMLResponse(content=HTML_CONTENT)
+    rendered = HTML_CONTENT.replace("{{SENTINEL_ADMIN_KEY_INJECTED}}", ADMIN_AUTH_TOKEN or "")
+    return HTMLResponse(content=rendered)
 
 @app.get("/api/status")
 async def get_status():
@@ -596,20 +599,24 @@ async def get_status():
 
 @app.post("/api/simulate-attack")
 async def trigger_attack(payload: dict, request: Request):
-    auth_header = request.headers.get("x-sentinel-auth") or request.headers.get("authorization", "")
-    client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "localhost", "::1") and auth_header != ADMIN_AUTH_TOKEN:
-        return JSONResponse(status_code=403, content={"error": "FORBIDDEN: Simulation controls restricted to authorized operator"})
+    if ADMIN_AUTH_TOKEN:
+        auth_header = request.headers.get("x-sentinel-auth") or request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            auth_header = auth_header[7:].strip()
+        if auth_header != ADMIN_AUTH_TOKEN:
+            return JSONResponse(status_code=403, content={"error": "FORBIDDEN: Simulation controls restricted to authorized operator"})
     pool_key = payload.get("pool", "Uniswap_v3_WETH_USDC")
     result = watcher.simulate_attack_and_mitigate(pool_key)
     return JSONResponse(content=result)
 
 @app.post("/api/reset-pool")
 async def reset(payload: dict, request: Request):
-    auth_header = request.headers.get("x-sentinel-auth") or request.headers.get("authorization", "")
-    client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "localhost", "::1") and auth_header != ADMIN_AUTH_TOKEN:
-        return JSONResponse(status_code=403, content={"error": "FORBIDDEN: Reset controls restricted to authorized operator"})
+    if ADMIN_AUTH_TOKEN:
+        auth_header = request.headers.get("x-sentinel-auth") or request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            auth_header = auth_header[7:].strip()
+        if auth_header != ADMIN_AUTH_TOKEN:
+            return JSONResponse(status_code=403, content={"error": "FORBIDDEN: Reset controls restricted to authorized operator"})
     pool_key = payload.get("pool", "Uniswap_v3_WETH_USDC")
     result = watcher.reset_pool(pool_key)
     return JSONResponse(content=result)

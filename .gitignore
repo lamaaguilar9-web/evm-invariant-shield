@@ -5,4 +5,6 @@ __pycache__/
 node_modules/
 *.bin
 *.abi
+data/*.json
+data/deployment_manifest_mainnet.json
 
