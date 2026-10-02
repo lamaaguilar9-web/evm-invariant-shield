@@ -196,7 +196,7 @@ contract EVMInvariantShield {
         TargetConfig storage config = _targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.NORMAL, "NOT_NORMAL");
-        require(block.timestamp >= config.lastPauseTimestamp + PAUSE_COOLDOWN, "PAUSE_COOLDOWN_ACTIVE");
+        require(config.lastPauseTimestamp == 0 || block.timestamp >= config.lastPauseTimestamp + PAUSE_COOLDOWN, "PAUSE_COOLDOWN_ACTIVE");
 
         (uint160 currentSqrtPriceX96, int24 currentTick,,,,,) = IUniswapV3Pool(targetPool).slot0();
         uint128 currentLiquidity = IUniswapV3Pool(targetPool).liquidity();
