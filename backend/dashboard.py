@@ -541,7 +541,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <span class="log-time">[DEFENSE DISPATCH - ${new Date().toLocaleTimeString()}]</span> 
                 <span class="log-drop">DRAIN ATTACK DETECTED (-24.0%)</span> on <b>${data.pool}</b>. 
                 Defensive pause dispatched via <span class="log-tx">${data.relay}</span>. 
-                Bundle: <code>${data.bundleHash}</code>. 
+                Bundle: <code>${data.bundleHash ? data.bundleHash : 'RELAY_STANDBY_DRY_RUN (No Fabricated Hash)'}</code>. 
                 Latency: <b>${data.mitigationLatencyMs}ms</b>. 
                 State: <i>Emergency Wind Down armed (24h)</i>.
             `;
