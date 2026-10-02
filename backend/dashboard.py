@@ -10,7 +10,7 @@ Protects Ethereum Mainnet (Uniswap v3 & Aave v3) with Flashbots Protect Private 
 """
 import os
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from backend.mempool_watcher import EVMMempoolWatcher
@@ -19,9 +19,9 @@ app = FastAPI(title="EVM Invariant Shield", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5057", "http://127.0.0.1:5057"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -362,8 +362,8 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <div class="eth-icon">Ξ</div>
                 <div class="brand-title">
                     <h1>EVM Invariant Shield 
-                        <span class="badge-live">PORT 5057 • ACTIVE</span>
-                        <span style="background: rgba(98, 126, 234, 0.2); color: #82a0ff; border: 1px solid #627eea; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-family: 'JetBrains Mono', monospace; font-weight: 700;">🛡️ AUDIT CERTIFIED v1.4.0</span>
+                        <span class="badge-live">ACTIVE (LOCAL)</span>
+                        <span style="background: rgba(148, 163, 184, 0.2); color: #94a3b8; border: 1px solid #475569; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-family: 'JetBrains Mono', monospace; font-weight: 700;">🛡️ TELEMETRY MONITORING v1.4.0 (AUDIT PENDING)</span>
                     </h1>
                     <p>Sub-45ms Non-Custodial Circuit Breaker with Flashbots Protect Private Relays (Ethereum L1)</p>
                 </div>
@@ -379,13 +379,13 @@ HTML_CONTENT = """<!DOCTYPE html>
         <!-- Fleet Matrix Bar -->
         <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 12px 18px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; font-family: 'JetBrains Mono', monospace; font-size: 12px; flex-wrap: wrap; gap: 10px;">
             <div style="color: var(--text-dim); display: flex; align-items: center; gap: 8px;">
-                <span style="color: var(--accent-emerald);">●</span> <strong>SENTINEL FLEET 24/7 MATRIX:</strong>
+                <span style="color: var(--accent-emerald);">●</span> <strong>SENTINEL FLEET SECURITY MATRIX:</strong>
             </div>
             <div style="display: flex; gap: 14px; flex-wrap: wrap;">
-                <a href="http://2.25.121.124:8000" target="_blank" style="color: #c084fc; text-decoration: none; padding: 4px 10px; background: rgba(192, 132, 252, 0.1); border-radius: 6px; border: 1px solid rgba(192, 132, 252, 0.2);">🟣 Solana (Port 8000)</a>
-                <a href="http://2.25.121.124:5055" target="_blank" style="color: #facc15; text-decoration: none; padding: 4px 10px; background: rgba(250, 204, 21, 0.1); border-radius: 6px; border: 1px solid rgba(250, 204, 21, 0.2);">🟡 BNB Chain (Port 5055)</a>
-                <a href="http://2.25.121.124:5056" target="_blank" style="color: #38bdf8; text-decoration: none; padding: 4px 10px; background: rgba(56, 189, 248, 0.1); border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2);">🔵 Arbitrum (Port 5056)</a>
-                <span style="color: #627eea; padding: 4px 10px; background: rgba(98, 126, 234, 0.2); border-radius: 6px; border: 1px solid #627eea; font-weight: 700;">🔷 Ethereum (Port 5057) • CURRENT</span>
+                <span style="color: #c084fc; padding: 4px 10px; background: rgba(192, 132, 252, 0.1); border-radius: 6px; border: 1px solid rgba(192, 132, 252, 0.2);">🟣 Solana Sentinel</span>
+                <span style="color: #facc15; padding: 4px 10px; background: rgba(250, 204, 21, 0.1); border-radius: 6px; border: 1px solid rgba(250, 204, 21, 0.2);">🟡 BNB Chain Sentinel (Certified)</span>
+                <span style="color: #38bdf8; padding: 4px 10px; background: rgba(56, 189, 248, 0.1); border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2);">🔵 Arbitrum Sentinel</span>
+                <span style="color: #627eea; padding: 4px 10px; background: rgba(98, 126, 234, 0.2); border-radius: 6px; border: 1px solid #627eea; font-weight: 700;">🔷 Ethereum Sentinel (Local Engine)</span>
             </div>
         </div>
 
@@ -526,10 +526,15 @@ HTML_CONTENT = """<!DOCTYPE html>
             }
         }
 
+        const LOCAL_AUTH_TOKEN = "sentinel-local-auth";
+
         async function simulateAttack(poolKey) {
             const res = await fetch('/api/simulate-attack', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Sentinel-Auth': LOCAL_AUTH_TOKEN
+                },
                 body: JSON.stringify({pool: poolKey})
             });
             const data = await res.json();
@@ -553,7 +558,10 @@ HTML_CONTENT = """<!DOCTYPE html>
         async function resetPool(poolKey) {
             const res = await fetch('/api/reset-pool', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Sentinel-Auth': LOCAL_AUTH_TOKEN
+                },
                 body: JSON.stringify({pool: poolKey})
             });
             const data = await res.json();
@@ -576,6 +584,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 </html>
 """
 
+ADMIN_AUTH_TOKEN = os.environ.get("SENTINEL_ADMIN_KEY", "sentinel-local-auth")
+
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
     return HTMLResponse(content=HTML_CONTENT)
@@ -585,16 +595,26 @@ async def get_status():
     return JSONResponse(content=watcher.get_telemetry_state())
 
 @app.post("/api/simulate-attack")
-async def trigger_attack(payload: dict):
+async def trigger_attack(payload: dict, request: Request):
+    auth_header = request.headers.get("x-sentinel-auth") or request.headers.get("authorization", "")
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "localhost", "::1") and auth_header != ADMIN_AUTH_TOKEN:
+        return JSONResponse(status_code=403, content={"error": "FORBIDDEN: Simulation controls restricted to authorized operator"})
     pool_key = payload.get("pool", "Uniswap_v3_WETH_USDC")
     result = watcher.simulate_attack_and_mitigate(pool_key)
     return JSONResponse(content=result)
 
 @app.post("/api/reset-pool")
-async def reset(payload: dict):
+async def reset(payload: dict, request: Request):
+    auth_header = request.headers.get("x-sentinel-auth") or request.headers.get("authorization", "")
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "localhost", "::1") and auth_header != ADMIN_AUTH_TOKEN:
+        return JSONResponse(status_code=403, content={"error": "FORBIDDEN: Reset controls restricted to authorized operator"})
     pool_key = payload.get("pool", "Uniswap_v3_WETH_USDC")
     result = watcher.reset_pool(pool_key)
     return JSONResponse(content=result)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=5057)
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", 5057))
+    uvicorn.run(app, host=host, port=port)

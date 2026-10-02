@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 EIP-1559 Dynamic Gas Overbidding Engine for EVM Invariant Shield.
-Calculates high-priority gas parameters to outbid attackers and secure top-of-block defensive inclusion.
+Calculates high-priority gas parameters to outbid attackers and secure fast defensive inclusion.
+Zero unprovable top-of-block inclusion guarantees (GLM EVM-M8).
 """
 
 class EIP1559GasEngine:
@@ -11,7 +12,7 @@ class EIP1559GasEngine:
 
     def calculate_defense_gas(self, base_fee_wei: int) -> dict:
         """
-        Computes dynamic maxFeePerGas and maxPriorityFeePerGas.
+        Computes dynamic maxFeePerGas and maxPriorityFeePerGas based on live network base fee.
         """
         # Dynamic priority fee: 25% of base fee + fixed priority premium
         priority_fee = int(base_fee_wei * 0.25) + self.priority_premium_wei
@@ -24,5 +25,5 @@ class EIP1559GasEngine:
             "maxFeePerGasWei": max_fee,
             "maxFeePerGasGwei": round(max_fee / 1e9, 2),
             "overbidMultiplier": self.max_fee_multiplier,
-            "priorityStatus": "TOP_OF_BLOCK_GUARANTEED"
+            "priorityStatus": "HIGH_PRIORITY_ESCALATED"
         }
