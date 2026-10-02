@@ -6,13 +6,11 @@ import "../contracts/ProtectedPoolReceiver.sol";
 import "../contracts/libraries/FullMath.sol";
 import "../contracts/libraries/UniswapV3InvariantChecker.sol";
 
-// Interface for Foundry cheatcodes
 interface Vm {
     function prank(address) external;
     function warp(uint256) external;
 }
 
-// Mock MockERC20 for Foundry
 contract MockERC20 {
     string public name;
     mapping(address => uint256) public balanceOf;
@@ -26,16 +24,17 @@ contract MockERC20 {
     }
 }
 
-// Mock Uniswap v3 Pool with slot0 and liquidity
 contract MockUniswapV3Pool {
     uint160 public sqrtPriceX96;
     int24 public tick;
-    uint128 public liquidity;
+    uint128 public poolLiquidity;
+    uint128 public positionLiquidity;
 
     constructor(uint160 _sqrt, int24 _tick, uint128 _liq) {
         sqrtPriceX96 = _sqrt;
         tick = _tick;
-        liquidity = _liq;
+        poolLiquidity = _liq;
+        positionLiquidity = _liq;
     }
 
     function setSlot0(uint160 _sqrt, int24 _tick) external {
@@ -43,10 +42,35 @@ contract MockUniswapV3Pool {
         tick = _tick;
     }
 
+    function setLiquidity(uint128 _liq) external {
+        poolLiquidity = _liq;
+    }
+
     function slot0() external view returns (
         uint160, int24, uint16, uint16, uint16, uint8, bool
     ) {
         return (sqrtPriceX96, tick, 0, 0, 0, 0, true);
+    }
+
+    function liquidity() external view returns (uint128) {
+        return poolLiquidity;
+    }
+
+    function positions(bytes32) external view returns (uint128, uint256, uint256, uint128, uint128) {
+        return (positionLiquidity, 0, 0, 0, 0);
+    }
+
+    function burn(int24, int24, uint128 amount) external returns (uint256, uint256) {
+        if (amount <= positionLiquidity) {
+            positionLiquidity -= amount;
+        } else {
+            positionLiquidity = 0;
+        }
+        return (0, 0);
+    }
+
+    function collect(address, int24, int24, uint128, uint128) external pure returns (uint128, uint128) {
+        return (0, 0);
     }
 }
 
@@ -66,7 +90,6 @@ contract EVMInvariantShieldTest {
     function setUp() public {
         token0 = new MockERC20("WETH");
         token1 = new MockERC20("USDC");
-        receiver = new ProtectedPoolReceiver(address(token0), address(token1));
 
         // Initial price: 3,500 USDC / WETH
         // sqrtPriceX96 = sqrt(3500) * 2^96 ~= 468494958188145244569501538304
@@ -75,7 +98,18 @@ contract EVMInvariantShieldTest {
         pool = new MockUniswapV3Pool(initSqrtP, initTick, 10000000);
 
         shield = new EVMInvariantShield(sentinelBot, gnosisSafe);
+
+        receiver = new ProtectedPoolReceiver(
+            address(token0),
+            address(token1),
+            address(pool),
+            80000,
+            83000
+        );
         receiver.setCircuitBreaker(address(shield));
+
+        vm.prank(gnosisSafe);
+        shield.registerTarget(address(pool), address(receiver), address(0));
     }
 
     // 1. Verificación de la matemática cuadrática exacta
@@ -100,63 +134,100 @@ contract EVMInvariantShieldTest {
         require(sqrtP == 468494958188145244569501538304, "Slot0 no debe cambiar!");
     }
 
-    // 3. Salida ordenada (orderlyWithdraw) con pagos proporcionales y ejecución real
-    function test_3_OrderlyWithdrawalProportionalPayout() public {
-        token0.mint(address(receiver), 100 ether);
-        token1.mint(address(receiver), 350_000 * 1e6);
-
-        // Vault manager emite 50 LP a Alice y 50 LP a Bob
-        receiver.mintLp(alice, 50);
-        receiver.mintLp(address(0x9999), 50); // 100 LP shares totales
-
-        // Circuit breaker activa la liquidación ordenada
-        receiver.emergencyWindDown();
-
-        // Alice ejecuta el retiro ordenado de sus 50 LP shares
-        vm.prank(alice);
-        (uint256 a0, uint256 a1) = receiver.orderlyWithdraw(50);
-
-        require(a0 == 50 ether, "Payout a0 incorrecto");
-        require(a1 == 175_000 * 1e6, "Payout a1 incorrecto");
-        require(receiver.lpBalances(alice) == 0, "LP no quemado");
-        require(token0.balanceOf(alice) == 50 ether, "Payout token0 incorrecto");
-        require(token1.balanceOf(alice) == 175_000 * 1e6, "Payout token1 incorrecto");
-        require(receiver.totalLpSupply() == 50, "Total LP supply incorrecto");
-    }
-
-    // 4. Verificación de control de acceso en mintLp (Inmune a emisión arbitraria)
-    function test_4_UnauthorizedMintLpReverts() public {
-        address attacker = address(0x6666);
-        vm.prank(attacker);
-        try receiver.mintLp(attacker, 1_000_000) {
-            revert("TEST4_FAILED: Attacker should not be able to mint LP");
-        } catch Error(string memory reason) {
-            require(
-                keccak256(bytes(reason)) == keccak256(bytes("NOT_LIQUIDITY_MANAGER")),
-                "Unexpected revert reason"
-            );
-        }
-    }
-
-    // 5. Salvaguarda en unpauseTarget con verificación de precio mínimo de mercado
-    function test_5_UnpauseRevertsIfMarketNotRestored() public {
-        shield.registerTarget(address(pool), address(receiver));
-
-        // Simular caída del 20% en el pool
-        pool.setSlot0(894427, 79000);
+    // 3. Disparo de emergencia y retiro activo de capital (burn+collect al vault)
+    function test_3_AutonomousPauseAndCapitalRetreat() public {
+        // Crash de precio del 20%: sqrtP baja a ~419034293800000000000000000000
+        pool.setSlot0(419034293800000000000000000000, 79000);
 
         vm.prank(sentinelBot);
         shield.triggerEmergencyPause(address(pool));
 
-        // Multifirma intenta despausar cuando el precio aún está deprimido
+        EVMInvariantShield.TargetConfig memory cfg = shield.targets(address(pool));
+        require(cfg.state == EVMInvariantShield.PoolState.PAUSED, "Pool debio pausarse");
+        require(receiver.paused(), "Receiver debio pausarse");
+        require(receiver.retreatedLiquidity() == 10000000, "Capital debio retirarse al vault (burn+collect)");
+    }
+
+    // 4. Disparo autónomo por drenaje abrupto de liquidez (EVMC-S1)
+    function test_4_LiquidityDrainTrigger() public {
+        // Reducción del 35% de liquidez (supera 30% maxDrainBps) con precio intacto
+        pool.setLiquidity(6500000);
+
+        vm.prank(sentinelBot);
+        shield.triggerEmergencyPause(address(pool));
+
+        EVMInvariantShield.TargetConfig memory cfg = shield.targets(address(pool));
+        require(cfg.state == EVMInvariantShield.PoolState.PAUSED, "Drenaje de liquidez debio disparar pausa");
+        require(receiver.paused(), "Receiver debio pausarse tras drenaje");
+    }
+
+    // 5. High-Water Mark ancla y protege ante crash-desde-pico (EVMC-S2)
+    function test_5_HighWaterMarkRallyCrashProtection() public {
+        vm.warp(block.timestamp + 100);
+
+        // Subida de precio del 30%: rally verificado
+        uint160 rallySqrtP = 534141634500000000000000000000;
+        pool.setSlot0(rallySqrtP, 84000);
+
+        // Sentinel actualiza el High-Water Mark
+        vm.prank(sentinelBot);
+        shield.updateHighWaterMark(address(pool));
+
+        EVMInvariantShield.TargetConfig memory cfg1 = shield.targets(address(pool));
+        require(cfg1.highWaterMarkSqrtPriceX96 == rallySqrtP, "HWM debio actualizarse al pico");
+
+        vm.warp(block.timestamp + 1000);
+
+        // Crash del 18% desde el pico (queda aún arriba del precio inicial, pero viola el HWM)
+        uint160 dropFromPeakSqrtP = 483600000000000000000000000000;
+        pool.setSlot0(dropFromPeakSqrtP, 82000);
+
+        vm.prank(sentinelBot);
+        shield.triggerEmergencyPause(address(pool));
+
+        EVMInvariantShield.TargetConfig memory cfg2 = shield.targets(address(pool));
+        require(cfg2.state == EVMInvariantShield.PoolState.PAUSED, "Crash desde pico HWM debio disparar pausa");
+    }
+
+    // 6. Rechazo de despausado si el mercado no cumple precio mínimo
+    function test_6_AntiGriefingRestorationConstraint() public {
+        pool.setSlot0(419034293800000000000000000000, 79000);
+        vm.prank(sentinelBot);
+        shield.triggerEmergencyPause(address(pool));
+
+        // Intento de despausar con mercado aún deprimido
         vm.prank(gnosisSafe);
-        try shield.unpauseTargetWithMinPrice(address(pool), 400000000000000000000000000000) {
-            revert("TEST5_FAILED: Depressed pool unpause should revert");
+        try shield.unpauseTargetWithOracle(address(pool), 460000000000000000000000000000, 3600) {
+            revert("TEST6_FAILED: Despausado debio revertir por precio insuficiente");
         } catch Error(string memory reason) {
-            require(
-                keccak256(bytes(reason)) == keccak256(bytes("MARKET_NOT_RESTORED: PRICE_BELOW_MINIMUM")),
-                "Unexpected revert reason"
-            );
+            require(keccak256(bytes(reason)) == keccak256(bytes("MARKET_NOT_RESTORED")), "Expected MARKET_NOT_RESTORED");
         }
+    }
+
+    // 7. Despausado multisig y gobernanza restore from wind-down (EVMC-M5)
+    function test_7_GovernanceRestoreFromWindDown() public {
+        pool.setSlot0(419034293800000000000000000000, 79000);
+        vm.prank(sentinelBot);
+        shield.triggerEmergencyPause(address(pool));
+
+        // Transcurren 24h
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        // Se activa Emergency Wind-Down
+        shield.activateEmergencyWindDown(address(pool));
+
+        EVMInvariantShield.TargetConfig memory cfgWind = shield.targets(address(pool));
+        require(cfgWind.state == EVMInvariantShield.PoolState.EMERGENCY_WIND_DOWN, "Estado debio ser WIND_DOWN");
+
+        // Mercado se estabiliza y gobernanza restaura el estado
+        pool.setSlot0(468494958188145244569501538304, 81625);
+        pool.setLiquidity(10000000);
+
+        vm.prank(gnosisSafe);
+        shield.governanceRestoreFromWindDown(address(pool));
+
+        EVMInvariantShield.TargetConfig memory cfgRestored = shield.targets(address(pool));
+        require(cfgRestored.state == EVMInvariantShield.PoolState.NORMAL, "Gobernanza debio restaurar a NORMAL");
+        require(!receiver.paused(), "Receiver debio despausarse");
     }
 }

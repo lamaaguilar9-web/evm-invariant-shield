@@ -59,6 +59,10 @@ contract MockUniswapV3PoolHardened {
         return (sqrtPriceX96, tick, 0, 0, 0, 0, true);
     }
 
+    function liquidity() external view returns (uint128) {
+        return positionLiquidity;
+    }
+
     function positions(bytes32) external view returns (uint128, uint256, uint256, uint128, uint128) {
         return (positionLiquidity, 0, 0, 0, 0);
     }
