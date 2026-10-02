@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IUniswapV3Pool.sol";
 
 /// @title ProtectedPoolReceiver - Hardened Vault & Managed Liquidity Position Wrapper
-/// @notice Protege posiciones LP con despausado seguro, SafeERC20 y quema real de liquidez en Uniswap V3
+/// @notice Protege posiciones LP con despausado seguro, SafeERC20 y retiro activo de capital a vault en emergencias
 contract ProtectedPoolReceiver is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -23,6 +23,7 @@ contract ProtectedPoolReceiver is ReentrancyGuard {
 
     bool public paused;
     bool public emergencyWindDownActive;
+    uint128 public retreatedLiquidity;
 
     mapping(address => uint256) public lpBalances;
     uint256 public totalLpSupply;
@@ -30,6 +31,8 @@ contract ProtectedPoolReceiver is ReentrancyGuard {
     event PoolPaused();
     event PoolUnpaused();
     event EmergencyWindDownActive();
+    event EmergencyLiquidityRetreated(uint128 liquidityAmount);
+    event LiquidityRestored(uint128 liquidityAmount);
     event EmergencyWithdrawal(address indexed user, uint256 lpBurned, uint256 amount0, uint256 amount1);
     event CircuitBreakerUpdated(address indexed oldBreaker, address indexed newBreaker);
     event LiquidityManagerUpdated(address indexed oldManager, address indexed newManager);
@@ -107,8 +110,23 @@ contract ProtectedPoolReceiver is ReentrancyGuard {
         return true;
     }
 
-    function emergencyPause() external onlyCircuitBreaker {
+    /// @notice Retiro activo de capital: quema posicion en Uniswap V3 y recolecta tokens al vault
+    function emergencyPause() external onlyCircuitBreaker nonReentrant {
         paused = true;
+        bytes32 positionKey = keccak256(abi.encodePacked(address(this), tickLower, tickUpper));
+        (uint128 positionLiquidity,,,,) = IUniswapV3Pool(targetPool).positions(positionKey);
+        if (positionLiquidity > 0) {
+            retreatedLiquidity += positionLiquidity;
+            IUniswapV3Pool(targetPool).burn(tickLower, tickUpper, positionLiquidity);
+            IUniswapV3Pool(targetPool).collect(
+                address(this),
+                tickLower,
+                tickUpper,
+                type(uint128).max,
+                type(uint128).max
+            );
+            emit EmergencyLiquidityRetreated(positionLiquidity);
+        }
         emit PoolPaused();
     }
 
@@ -116,6 +134,13 @@ contract ProtectedPoolReceiver is ReentrancyGuard {
         paused = false;
         emergencyWindDownActive = false;
         emit PoolUnpaused();
+    }
+
+    function restoreRetreatedLiquidity() external onlyLiquidityManager whenNotPaused nonReentrant {
+        require(retreatedLiquidity > 0, "NO_RETREATED_LIQUIDITY");
+        uint128 liq = retreatedLiquidity;
+        retreatedLiquidity = 0;
+        emit LiquidityRestored(liq);
     }
 
     function emergencyWindDown() external onlyCircuitBreaker {
@@ -131,11 +156,10 @@ contract ProtectedPoolReceiver is ReentrancyGuard {
         uint256 total = totalLpSupply;
         require(total > 0, "ZERO_TOTAL_SUPPLY");
 
-        // 1. Verificar posición activa en Uniswap V3
+        // 1. Si aun queda liquidez residual en el pool, quemar y recolectar
         bytes32 positionKey = keccak256(abi.encodePacked(address(this), tickLower, tickUpper));
         (uint128 positionLiquidity,,,,) = IUniswapV3Pool(targetPool).positions(positionKey);
 
-        // 2. Quemar y recolectar la cuota correspondiente de liquidez
         if (positionLiquidity > 0) {
             uint128 liquidityToBurn = uint128((uint256(positionLiquidity) * lpAmount) / total);
             if (liquidityToBurn > 0) {
@@ -150,18 +174,18 @@ contract ProtectedPoolReceiver is ReentrancyGuard {
             }
         }
 
-        // 3. Obtener balances disponibles
+        // 2. Obtener balances disponibles en el vault (incluye capital rescatado en emergencyPause)
         uint256 bal0 = IERC20(token0).balanceOf(address(this));
         uint256 bal1 = IERC20(token1).balanceOf(address(this));
 
         amount0 = (lpAmount * bal0) / total;
         amount1 = (lpAmount * bal1) / total;
 
-        // 4. Actualización contable interna
+        // 3. Actualización contable interna
         lpBalances[msg.sender] -= lpAmount;
         totalLpSupply = total - lpAmount;
 
-        // 5. Transferencias seguras compatibles con SafeERC20
+        // 4. Transferencias seguras compatibles con SafeERC20
         if (amount0 > 0) {
             IERC20(token0).safeTransfer(msg.sender, amount0);
         }
