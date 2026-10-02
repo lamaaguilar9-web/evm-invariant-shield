@@ -7,14 +7,7 @@ import "../contracts/libraries/UniswapV3InvariantChecker.sol";
 import "../contracts/interfaces/IUniswapV3Pool.sol";
 import "../contracts/interfaces/AggregatorV3Interface.sol";
 
-interface Vm {
-    function prank(address) external;
-    function startPrank(address) external;
-    function stopPrank() external;
-    function deal(address, uint256) external;
-    function deal(address, address, uint256) external;
-    function warp(uint256) external;
-}
+import "forge-std/Test.sol";
 
 interface IERC20Extended {
     function balanceOf(address) external view returns (uint256);
@@ -24,8 +17,7 @@ interface IERC20Extended {
 
 /// @title ForkIntegrationTest - Mainnet Fork Testing against Live Uniswap v3 WETH/USDC (0.05%)
 /// @notice Validates real liquidity deposit, large swap crash, sentinel trigger, oracle check, and orderly withdrawal
-contract ForkIntegrationTest {
-    Vm internal constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+contract ForkIntegrationTest is Test {
 
     // Ethereum Mainnet Live Canonical Addresses
     address public constant MAINNET_WETH_USDC_POOL = 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640; // 0.05% fee pool
@@ -94,8 +86,8 @@ contract ForkIntegrationTest {
         require(initialSqrtP > 0, "Invalid initial pool state");
 
         // Fondos reales ERC20 para swap de gran volumen que desplome el precio
-        vm.deal(MAINNET_USDC, address(this), 100_000_000 * 1e6); // 100M USDC
-        vm.deal(MAINNET_WETH, address(this), 50_000 ether);      // 50k WETH
+        deal(MAINNET_USDC, address(this), 100_000_000 * 1e6); // 100M USDC
+        deal(MAINNET_WETH, address(this), 50_000 ether);      // 50k WETH
         IERC20Extended(MAINNET_USDC).approve(MAINNET_WETH_USDC_POOL, type(uint256).max);
         IERC20Extended(MAINNET_WETH).approve(MAINNET_WETH_USDC_POOL, type(uint256).max);
 
@@ -141,8 +133,8 @@ contract ForkIntegrationTest {
         if (MAINNET_WETH_USDC_POOL.code.length == 0) return;
 
         // Depositar tokens ERC20 reales en el vault (ProtectedPoolReceiver)
-        vm.deal(MAINNET_USDC, address(receiver), 200_000 * 1e6); // 200k USDC
-        vm.deal(MAINNET_WETH, address(receiver), 50 ether);       // 50 WETH
+        deal(MAINNET_USDC, address(receiver), 200_000 * 1e6); // 200k USDC
+        deal(MAINNET_WETH, address(receiver), 50 ether);       // 50 WETH
 
         vm.startPrank(deployer);
         receiver.mintLp(alice, 50 ether);
