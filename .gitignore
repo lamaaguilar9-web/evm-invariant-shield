@@ -7,4 +7,6 @@ node_modules/
 *.abi
 data/*.json
 data/deployment_manifest_mainnet.json
+out/
+cache/
 
