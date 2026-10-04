@@ -147,3 +147,7 @@ python -m unittest tests/test_anvil_fork.py
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+> **Privacidad:** EVM Invariant Shield es una herramienta de infraestructura interna. No recopila datos personales de usuarios finales; procesa únicamente datos públicos de blockchain y telemetría técnica generada por el propio sistema. Contacto: luis.growthhq@gmail.com
